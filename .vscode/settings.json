@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "./gesture-recognition-robot"
+    ]
+}
