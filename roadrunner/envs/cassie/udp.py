@@ -1,0 +1,438 @@
+import time
+import torch
+import pickle
+import platform
+
+import sys
+import datetime
+
+import select, termios, tty
+
+try:
+    from .cassiemujoco import pd_in_t, state_out_t, CassieSim, CassieVis
+    from .cassiemujoco.cassieUDP import *
+    from .cassiemujoco.cassiemujoco_ctypes import *
+except ImportError:
+    from envs.cassie.cassiemujoco.cassieUDP import *
+    from envs.cassie.cassiemujoco.cassiemujoco_ctypes import *
+
+import math
+import numpy as np
+from copy import deepcopy
+from util.quat import *
+
+from util.mirror import mirror_tensor
+
+def remap(val, min1, max1, min2, max2):
+    span1 = max1 - min1
+    span2 = max2 - min2
+
+    scaled = (val - min1) / span1
+    return np.clip(min2 + (scaled * span2), min2, max2)
+
+def check_stdin():
+    return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
+
+def run_udp(policy, args, run_args):
+    from util.env import env_factory
+
+    policy = policy
+    m_policy = deepcopy(policy)
+
+    env = env_factory(**vars(run_args))()
+    env.dynamics_randomization = False
+    env.evaluation_mode = True
+
+    print("Policy is a: {}".format(policy.__class__.__name__))
+    time.sleep(1)
+
+    time_log   = []  # time stamp
+    input_log  = []  # network inputs
+    output_log = []  # network outputs
+    state_log  = []  # cassie state
+    target_log = []  # PD target log
+
+    no_delta = True
+
+    u = pd_in_t()
+    for i in range(5):
+        u.leftLeg.motorPd.pGain[i]  = env.P[i]
+        u.leftLeg.motorPd.dGain[i]  = env.D[i]
+        u.rightLeg.motorPd.pGain[i] = env.P[i]
+        u.rightLeg.motorPd.dGain[i] = env.D[i]
+
+    if platform.node() == 'cassie':
+        cassie = CassieUdp(remote_addr='10.10.10.3', remote_port='25010', local_addr='10.10.10.100', local_port='25011')
+    else:
+        cassie = CassieUdp()  # local testing
+
+    print('Connecting...')
+    y = None
+    while y is None:
+        cassie.send_pd(pd_in_t())
+        time.sleep(0.001)
+        y = cassie.recv_newest_pd()
+
+    print('Connected!\n')
+
+    # Whether or not STO has been TOGGLED (i.e. it does not count the initial STO condition)
+    # STO = True means that STO is ON (i.e. robot is not running) and STO = False means that STO is
+    # OFF (i.e. robot *is* running)
+    ESTOP = False
+
+    # We have multiple modes of operation
+    # 0: Normal operation, walking with policy
+    # 1: Zero out memory of policy (if applicable)
+    # 2: Stop, drop, and hopefully not roll, damping mode with no P gain
+    operation_mode = 0
+
+    # Command inputs
+    speed             = 0
+    side_speed        = 0
+    orient_add        = 0
+    phase_add         = env.default_simrate
+    coeff             = [1, 0]
+    ratio             = [0.5, 0.5]
+    period_shift      = [0.0, 0.5]
+    phase             = 0
+    D_mult            = 1
+    actual_speed      = 0
+    actual_side_speed = 0
+    delay             = 1000 * (env.default_simrate / 2000)
+    counter           = 0
+    pitch_bias        = 0
+    ESTOP_count       = 0
+    min_y_speed, max_y_speed = env.side_speed_bounds
+    logged            = True
+    mirror            = False
+
+    should_log        = False
+
+    env.min_swing_ratio = 0
+
+    m_idx = env.get_state_mirror_indices()
+    a_idx = env.get_action_mirror_indices()
+
+
+    if hasattr(policy, 'init_hidden_state'):
+        policy.init_hidden_state()
+    if hasattr(policy, 'init_hidden_state'):
+        m_policy.init_hidden_state()
+
+    old_settings = termios.tcgetattr(sys.stdin)
+    try:
+        tty.setcbreak(sys.stdin.fileno())
+
+        t  = time.monotonic()
+        t0 = t
+        with torch.no_grad():
+            while True:
+                t = time.monotonic()
+
+                tt = time.monotonic() - t0
+
+                # Get newest state
+                state = None
+                while state is None:
+                    state = cassie.recv_newest_pd()
+
+                turn_rate = 0
+                if platform.node() == 'cassie':
+                    """
+                    Control of the physical robot using a wireless handheld controller.
+                    """
+
+                    # Switch the operation mode based on the toggle next to STO
+                    if state.radio.channel[9] < -0.5:  # towards operator means damping shutdown mode
+                        operation_mode = 2
+                        speed = 0
+                    elif state.radio.channel[9] > 0.5:  # away from the operator means zero hidden states
+                        operation_mode = 1
+                        speed = 0
+                    else:                              # Middle means normal walking
+                        operation_mode = 0
+
+                    # Radio control
+                    turn_rate = -state.radio.channel[3] / 60.0
+
+                    # Reset orientation on STO
+                    if state.radio.channel[8] < 0:
+                        orient_add = quaternion2euler(state.pelvis.orientation[:])[2]
+                        ESTOP = True
+                    else:
+                        ESTOP = False
+                        logged = False
+
+                    raw_spd = (state.radio.channel[0]) * 0.1
+                    if np.abs(raw_spd) < 0.01:
+                        raw_spd = 0
+                    speed += raw_spd * 0.1
+
+                    raw_side_spd = -state.radio.channel[1]
+                    side_speed = raw_side_spd * env.side_speed_bounds[1] if raw_side_spd > 0 else -raw_side_spd * env.side_speed_bounds[0]
+
+                    #phase_add = env.default_simrate + env.default_simrate * (state.radio.channel[4] + 0.75)/2
+                    phase_add = env.default_simrate * remap(state.radio.channel[4], -1, 1, env.min_step_freq, env.max_step_freq)
+
+                    #period_shift = [(state.radio.channel[6] + 1)/2, 0.5]
+                    period_shift = [remap(state.radio.channel[6], -1, 1, 0, 0.5), 0.5]
+
+                    r_range = env.max_swing_ratio - env.min_swing_ratio
+                    #new_r = (state.radio.channel[7] + 1) / (2 * r_range) + env.min_swing_ratio
+                    new_r = remap(state.radio.channel[7], -1, 1, env.min_swing_ratio, env.max_swing_ratio)
+                    ratio = [new_r, 1 - new_r]
+
+                    mirror = int(state.radio.channel[10]) > 0
+
+                else:
+                    """
+                    Control of the robot in simulation using a keyboard.
+                    """
+                    tt = time.monotonic() - t0
+
+                    if check_stdin():
+                        c = sys.stdin.read(1)
+                        if c == 'w':
+                            speed = np.clip(speed + 0.1, *env.speed_bounds)
+                        if c == 's':
+                            speed = np.clip(speed - 0.1, *env.speed_bounds)
+                        if c == 'q':
+                            turn_rate = -0.01 * np.pi
+                        if c == 'e':
+                            turn_rate = 0.01 * np.pi
+                        if c == 'a':
+                            side_speed = np.clip(side_speed + 0.05, *env.side_speed_bounds)
+                        if c == 'd':
+                            side_speed = np.clip(side_speed - 0.05, *env.side_speed_bounds)
+                        if c == 't':
+                            phase_add = np.clip(phase_add + 1, int(env.default_simrate * env.step_freq_bounds[0]), int(env.default_simrate * env.step_freq_bounds[1]))
+                        if c == 'g':
+                            phase_add = np.clip(phase_add - 1, int(env.default_simrate * env.step_freq_bounds[0]), int(env.default_simrate * env.step_freq_bounds[1]))
+                        if c == 'm':
+                            mirror = not mirror
+                        if c == 'o':
+                            # increase ratio of phase 1
+                            ratio[0] = np.clip(ratio[0] + 0.01, *env.ratio_bounds)
+                            ratio[1] = 1 - ratio[0]
+                        if c == 'l':
+                            ratio[0] = np.clip(ratio[0] - 0.01, *env.ratio_bounds)
+                            ratio[1] = 1 - ratio[0]
+                        if c == 'p':
+                            period_shift[0] = np.clip(period_shift[0] + 0.01, 0, 0.5)
+                        if c == ';':
+                            period_shift[0] = np.clip(period_shift[0] - 0.01, 0, 0.5)
+
+                        if c == 'x':
+                            policy.init_hidden_state()
+                            m_policy.init_hidden_state()
+                            ESTOP = not ESTOP
+                            logged = False
+
+                if ESTOP:
+                    # Save log files after STO toggle (skipping first STO)
+                    if not logged:
+                        logged = True
+
+                        if should_log:
+                            # log(ESTOP_count)
+                            data = {"time": time_log,
+                                    "output": output_log,
+                                    "input": input_log,
+                                    "state": state_log,
+                                    "target": target_log}
+
+                            fname = 'log_' + \
+                                    datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H:%M') + \
+                                    '_' + str(datetime.timedelta(seconds=round(tt))) + \
+                                    '.pkl'
+                            print()
+                            print(fname)
+                            print()
+
+                            filep = open(fname, 'wb')
+                            pickle.dump(data, filep)
+                            filep.close()
+
+                            ESTOP_count += 1
+
+                            # Clear out logs
+                            time_log   = []
+                            input_log  = []
+                            output_log = []
+                            state_log  = []
+                            target_log = []
+                        t0 = time.monotonic()
+
+                    if hasattr(policy, 'init_hidden_state'):
+                        policy.init_hidden_state()
+                        m_policy.init_hidden_state()
+
+                # ------------------------------- Normal Walking ---------------------------
+                if operation_mode == 1:
+                    if hasattr(policy, 'init_hidden_state'):
+                        policy.init_hidden_state()
+                        m_policy.init_hidden_state()
+
+                # Quat before bias modification
+                quaternion = euler2quat(z=orient_add, y=0, x=0)
+                iquaternion = inverse_quaternion(quaternion)
+                new_orient = quaternion_product(iquaternion, state.pelvis.orientation[:])
+
+                clock = [np.sin(2 * np.pi *  (phase / env.phase_len + period_shift[0])),
+                         np.sin(2 * np.pi *  (phase / env.phase_len + period_shift[1]))]
+
+                motor_pos = state.motor.position[:]
+                joint_pos = state.joint.position[:]
+
+                motor_vel = state.motor.velocity[:]
+                joint_vel = state.joint.velocity[:]
+
+                joint_pos = joint_pos[:2] + joint_pos[3:5]  # remove double-counted joint/motor positions
+                joint_vel = joint_vel[:2] + joint_vel[3:5]
+
+                if new_orient[0] < 0:
+                    new_orient = [-1 * x for x in new_orient]
+
+                ext_state = np.concatenate(([*ratio, speed, side_speed, turn_rate], clock))
+
+                pelvis_vel   = rotate_by_quaternion(state.pelvis.translationalVelocity[:], iquaternion)
+                pelvis_rvel  = state.pelvis.rotationalVelocity[:]
+                pelvis_hgt   = state.pelvis.position[2] - state.terrain.height
+
+                robot_state = np.concatenate([
+                    new_orient,             # pelvis orientation
+                    pelvis_rvel,
+                    motor_pos,
+                    motor_vel,              # actuated joint velocities
+                    joint_pos,
+                    joint_vel               # unactuated joint velocities
+                ])
+
+                if operation_mode == 2 or ESTOP:
+                    mode = 'DAMP'
+                elif operation_mode == 1:
+                    mode = 'WIPE'
+                elif operation_mode == 0:
+                    mode = 'WALK'
+
+                if mirror:
+                    mode += ' (M) '
+
+                actual_speed      = 0.9 * actual_speed + 0.1 * pelvis_vel[0]
+                actual_side_speed = 0.9 * actual_side_speed + 0.1 * pelvis_vel[1]
+                RL_state          = np.concatenate([robot_state, ext_state])
+                torch_state         = torch.Tensor(RL_state)
+                mirror_torch_state   = mirror_tensor(torch_state, m_idx)
+
+                offset = env.offset
+
+                action        = policy(torch_state).numpy()
+                mirror_action = mirror_tensor(m_policy(mirror_torch_state), a_idx).numpy()
+
+                if mirror:
+                    env_action = (action + mirror_action) / 2
+                else:
+                    env_action = action
+
+                target = env_action[:10] + offset
+
+                p_gain = env_action[10:20] if len(action) > 10 else np.zeros(10)
+                d_gain = env_action[20:30] if len(action) > 20 else np.zeros(10)
+
+                if ESTOP or operation_mode == 2:
+                    for i in range(5):
+                        u.leftLeg.motorPd.pGain[i] = 0.001
+                        u.leftLeg.motorPd.dGain[i] = D_mult*env.D[i]
+                        u.rightLeg.motorPd.pGain[i] = 0.001
+                        u.rightLeg.motorPd.dGain[i] = D_mult*env.D[i]
+                        u.leftLeg.motorPd.pTarget[i] = 0.001
+                        u.rightLeg.motorPd.pTarget[i] = 0.001
+                else:
+                    # Send action
+                    for i in range(5):
+                        u.leftLeg.motorPd.pGain[i] = env.P[i] + p_gain[i]
+                        u.leftLeg.motorPd.dGain[i] = env.D[i] + d_gain[i]
+                        u.rightLeg.motorPd.pGain[i] = env.P[i] + p_gain[i+5]
+                        u.rightLeg.motorPd.dGain[i] = env.D[i] + d_gain[i+5]
+                        u.leftLeg.motorPd.pTarget[i] = target[i]
+                        u.rightLeg.motorPd.pTarget[i] = target[i+5]
+
+                    if should_log:
+                        time_log.append(time.time())
+                        state_log.append(state)
+                        input_log.append(RL_state)
+                        output_log.append(env_action)
+                        target_log.append(target)
+                cassie.send_pd(u)
+
+                measured_delay = (time.monotonic() - t) * 1000
+                while measured_delay < delay:
+                    measured_delay = (time.monotonic() - t) * 1000
+                    time.sleep(0.0001)
+
+                print("MODE {:10s} | cmd. spd. {:5.2f}, {:4.2f} | Speed {:5.1f}, {:4.2f} | Heading {:5.2f} | Freq. {:3d} | Delay {:6.3f} Ratio {:3.2f},{:3.2f} | Shift {:3.2f},{:3.2f} | {:20s}".format(mode, speed, side_speed, actual_speed, actual_side_speed, orient_add, int(phase_add), measured_delay, *ratio, *period_shift, ''), end='\r')
+
+
+                # Track phase
+                phase += phase_add
+                if phase >= env.phase_len:
+                    phase = phase % env.phase_len - 1
+                    counter += 1
+    finally:
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
+
+
+def logvis(filename):
+    print('loading log file {}'.format(filename))
+
+    sim = CassieSim("./cassie/cassiemujoco/cassie.xml")
+    vis = CassieVis(sim, "./cassie/cassiemujoco/cassie.xml")
+
+    logs        = np.load(open(filename, 'rb'), allow_pickle=True)
+    states      = logs['state']
+    qpos        = np.zeros(35)  # set initial values to zero
+    inv_pelvis  = inverse_quaternion(states[0].pelvis.orientation[:])
+
+    q_offset    = quaternion_product([1,0,0,0],inv_pelvis)
+    curr_foot   = np.zeros(6)
+    initial     = states[0].pelvis.position[0:3]
+    initial[2] -= states[0].terrain.height
+
+    if initial[2] < 1:
+        initial[2] -= initial[2]
+    while True:
+        for s in states:
+
+            qpos[0:3]   = [x1 - x2 for x1, x2 in zip(s.pelvis.position[0:3], initial)]
+            qpos[2]     = qpos[2] - s.terrain.height
+            qpos[3:7]   = quaternion_product(q_offset, s.pelvis.orientation[:])  # Pelvis Orientation
+
+            # Left side
+            qpos[7:10]  = s.motor.position[0:3]  # double check this is correct!! (left hip roll, pitch, and yaw)
+            theta1      = euler2quat(x=0, z=-s.joint.position[1], y=0)
+            qpos[10:14] = theta1
+            qpos[14]    = s.motor.position[3]  # knee
+            qpos[15:17] = s.joint.position[0:2]  # shin and tarsus
+            qpos[17]    = s.leftFoot.position[0]
+            qpos[18]    = s.motor.position[4] + 0.11  # Set left foot crank w offset from foot
+            qpos[19]    = -qpos[18] - 0.0184  # Set left plantar rod w offset from foot crank
+            qpos[20]    = s.motor.position[4]  # check if correct (Motor [4], Joint [2])
+
+            # Right side
+            qpos[21:24] = s.motor.position[5:8]  # double check (right hip roll, pitch, and yaw)
+            theta2      = euler2quat(x=0, z=-s.joint.position[4], y=0)
+            qpos[24:28] = theta2
+            qpos[28]    = s.motor.position[8]  # right knee
+            qpos[29:31] = s.joint.position[3:5]  # Right shin and tarsus
+            qpos[31]    = s.rightFoot.position[0]  #######Still Do########
+            qpos[32]    = s.motor.position[9] + 0.11  # Set right foot crank w offset from foot
+            qpos[33]    = -qpos[32] - 0.0184  # Set right plantar rod w offset from foot crank
+            qpos[34]    = s.motor.position[9]
+
+            sim.set_qpos(qpos)
+            sim.set_qvel(np.zeros(sim.nv))
+            sim.step_pd(pd_in_t())
+            sim.foot_pos(curr_foot)
+
+            render_state = vis.draw(sim)
+            time.sleep(0.0303)
