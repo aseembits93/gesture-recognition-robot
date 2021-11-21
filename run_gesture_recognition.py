@@ -1,71 +1,98 @@
 import cv2
+import socket
 import numpy as np
 import mediapipe as mp
 import tensorflow as tf
 from tensorflow.keras.models import load_model
 
+class Run_gesture_recognition:
 
-def run_gesture_recognition():
+    def __init__(self):
     # initialize mediapipe
-    mpHands = mp.solutions.hands
-    hands = mpHands.Hands(max_num_hands=1, min_detection_confidence=0.7)
-    mpDraw = mp.solutions.drawing_utils
+        self.mpHands = mp.solutions.hands
+        self.hands = self.mpHands.Hands(max_num_hands=1, min_detection_confidence=0.7)
+        self.mpDraw = mp.solutions.drawing_utils
 
-    # Load the gesture recognizer model
-    model = load_model('mp_hand_gesture')
+        # Load the gesture recognizer model
+        self.model = load_model('mp_hand_gesture')
 
-    classNames = ['okay', 'peace', 'thumbs up', 'thumbs down',
-                  'call me', 'stop', 'rock', 'live long', 'fist', 'smile']
+        self.classNames = ['okay', 'peace', 'thumbs up', 'thumbs down',
+                    'call me', 'stop', 'rock', 'live long', 'fist', 'smile']
 
-    # Initialize the webcam
-    cap = cv2.VideoCapture(0)
+        # Initialize the webcam
+        self.cap = cv2.VideoCapture(0)
 
-    while True:
-        # Read each frame from the webcam
-        _, frame = cap.read()
+        #Initialize connection
+        host = 'local host'
+        port = 7020
 
-        x, y, c = frame.shape
+        print("Starting")
 
-        # Flip the frame vertically
-        frame = cv2.flip(frame, 1)
-        framergb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind(("", port))
+        s.listen(1) #Allow only 1 connection
 
-        # Get hand landmark prediction
-        result = hands.process(framergb)
+        print("Started")
 
-        # post process the result
-        if result.multi_hand_landmarks:
-            landmarks = []
-            for handslms in result.multi_hand_landmarks:
-                for lm in handslms.landmark:
-                    lmx = int(lm.x * x)
-                    lmy = int(lm.y * y)
+        self.c, addr = s.accept()
 
-                    landmarks.append([lmx, lmy])
+        self.current_gesture = ""
+        self.run()
 
-                # Drawing landmarks on frames
-                mpDraw.draw_landmarks(
-                    frame, handslms, mpHands.HAND_CONNECTIONS)
+    def run(self):
+        print("Running")
+        while True:
+            # Read each frame from the webcam
+            _, frame = self.cap.read()
 
-                # Predict gesture
-                prediction = model.predict([landmarks])
-                classID = np.argmax(prediction)
-                className = classNames[classID]
+            x, y, c = frame.shape
 
-            # show the prediction on the frame
-            cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
-                        1, (0, 0, 255), 2, cv2.LINE_AA)
+            # Flip the frame vertically
+            frame = cv2.flip(frame, 1)
+            framergb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-        # Show the final output
-        cv2.imshow("Output", frame)
+            # Get hand landmark prediction
+            result = self.hands.process(framergb)
 
-        if cv2.waitKey(1) == ord('q'):
-            break
+            # post process the result
+            post_processed = False
+            if result.multi_hand_landmarks:
+                landmarks = []
+                for handslms in result.multi_hand_landmarks:
+                    for lm in handslms.landmark:
+                        lmx = int(lm.x * x)
+                        lmy = int(lm.y * y)
 
-    # release the webcam and destroy all active windows
-    cap.release()
+                        landmarks.append([lmx, lmy])
 
-    cv2.destroyAllWindows()
+                    # Drawing landmarks on frames
+                    self.mpDraw.draw_landmarks(
+                        frame, handslms, self.mpHands.HAND_CONNECTIONS)
 
+                    # Predict gesture
+                    prediction = self.model.predict([landmarks])
+                    classID = np.argmax(prediction)
+                    className = self.classNames[classID]
+                    post_processed = True
 
-run_gesture_recognition()
+                # show the prediction on the frame
+                cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
+                            1, (0, 0, 255), 2, cv2.LINE_AA)
+
+            # Show the final output
+            cv2.imshow("Output", frame)
+
+            if post_processed:
+                if self.current_gesture != className:
+                    self.current_gesture = className
+                    msg = className
+                    self.c.send(msg.encode())
+
+            if cv2.waitKey(1) == ord('q'):
+                break
+
+        # release the webcam and destroy all active windows
+        self.cap.release()
+        cv2.destroyAllWindows()
+
+Run_gesture_recognition()

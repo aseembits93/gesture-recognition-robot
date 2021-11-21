@@ -10,7 +10,7 @@ import platform
 import sys
 import datetime
 
-import select, termios, tty
+import socket, select, termios, tty
 
 from cassie.cassiemujoco import pd_in_t, state_out_t, CassieSim, CassieVis
 from cassie.cassiemujoco.cassieUDP import *
@@ -38,6 +38,18 @@ if __name__ == '__main__':
 
     print("Policy is a: {}".format(policy.__class__.__name__))
     time.sleep(1)
+
+    host = "local host"
+    port = 7020
+    freq = 50
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    print("connecting to socket")
+    s.connect(("10.1.10.108", port))
+    s.setblocking(0)
+
+    print("Connected to socket")
 
     time_log   = []  # time stamp
     input_log  = []  # network inputs
@@ -185,6 +197,30 @@ if __name__ == '__main__':
                     """
                     tt = time.monotonic() - t0
 
+                    ready = select.select([s],[],[],1/freq)
+                    if ready[0]:
+                        msg = s.recv(1024)
+                        print("Received: " + msg.decode())
+                        
+                        if msg.decode() == "thumbs up":
+                            speed = 0.4
+
+                        elif msg.decode() == "thumbs down":
+                            speed = -0.3
+
+                        elif msg.decode() == "stop":
+                            speed = 0.0
+
+                        else:
+                            pass
+
+                        
+
+                    else:
+                        print(speed)
+
+                    
+                    '''
                     if check_stdin():
                         c = sys.stdin.read(1)
                         if c == 'w':
@@ -219,6 +255,7 @@ if __name__ == '__main__':
                             policy.init_hidden_state()
                             ESTOP = not ESTOP
                             logged = False
+                    '''
 
                 if ESTOP:
                     # Save log files after STO toggle (skipping first STO)
@@ -352,7 +389,7 @@ if __name__ == '__main__':
                     measured_delay = (time.monotonic() - t) * 1000
                     time.sleep(0.0001)
 
-                print("MODE {:10s} | cmd. spd. {:5.2f}, {:4.2f} | Speed {:5.1f}, {:4.2f} | Heading {:5.2f} | Freq. {:3d} | Delay {:6.3f} Ratio {:3.2f},{:3.2f} | Shift {:3.2f},{:3.2f} | {:20s}".format(mode, speed, side_speed, actual_speed, actual_side_speed, orient_add, int(phase_add), measured_delay, *ratio, *period_shift, ''), end='\r')
+                #print("MODE {:10s} | cmd. spd. {:5.2f}, {:4.2f} | Speed {:5.1f}, {:4.2f} | Heading {:5.2f} | Freq. {:3d} | Delay {:6.3f} Ratio {:3.2f},{:3.2f} | Shift {:3.2f},{:3.2f} | {:20s}".format(mode, speed, side_speed, actual_speed, actual_side_speed, orient_add, int(phase_add), measured_delay, *ratio, *period_shift, ''), end='\r')
 
 
                 # Track phase
