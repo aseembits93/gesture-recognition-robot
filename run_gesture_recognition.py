@@ -32,15 +32,16 @@ class Run_gesture_recognition:
         s.bind(("", port))
         s.listen(1) #Allow only 1 connection
 
+        self.c, addr = s.accept()
         print("Started")
 
-        self.c, addr = s.accept()
 
         self.current_gesture = ""
         self.run()
 
-    def run(self):
+    def run(self, n=10):
         print("Running")
+        last_n = ['stop' for _ in range(n)]
         while True:
             # Read each frame from the webcam
             _, frame = self.cap.read()
@@ -72,8 +73,10 @@ class Run_gesture_recognition:
                     # Predict gesture
                     prediction = self.model.predict([landmarks])
                     classID = np.argmax(prediction)
-                    className = self.classNames[classID]
                     post_processed = True
+
+                    last_n = last_n[1:] + [self.classNames[classID]]
+                    className = max(last_n, key=last_n.count)
 
                 # show the prediction on the frame
                 cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
