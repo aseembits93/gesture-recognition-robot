@@ -39,8 +39,8 @@ if __name__ == '__main__':
     print("Policy is a: {}".format(policy.__class__.__name__))
     time.sleep(1)
 
-    host = "localhost"
-    port = 7020
+    host = "192.168.2.138"
+    port = 7021
     freq = 50
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -120,6 +120,7 @@ if __name__ == '__main__':
     pitch_bias        = 0
     ESTOP_count       = 0
     min_y_speed, max_y_speed = side_speed_bounds
+    min_step_freq, max_step_freq = step_freq_bounds
     logged            = True
 
     should_log        = False
@@ -149,27 +150,25 @@ if __name__ == '__main__':
                 while state is None:
                     state = cassie.recv_newest_pd()
 
+                on_robot_and_manual = (platform.node() == 'cassie' and state.radio.channel[13] > 0)
                 """
                 Control of the robot in simulation using a keyboard.
                 """
                 tt = time.monotonic() - t0
 
                 ready = select.select([s],[],[],1/freq)
-                if ready[0]:
-
+                if ready[0] and not on_robot_and_manual:
                     time_of_last_cmd = time.time()
                     msg = s.recv(1024)
-                    print("Received: " + msg.decode())
                     
-                    print(msg.decode())
                     # thumbs up or call me: forward
                     if msg.decode() == "thumbs up" or msg.decode() == 'call me':
-                        speed = 0.4
+                        speed = 0.3
                         turn_rate = 0
 
                     # thumbs down: backward
                     elif msg.decode() == "thumbs down":
-                        speed = -0.3
+                        speed = -0.25
                         turn_rate = 0
 
                     # stop or live long
@@ -179,21 +178,19 @@ if __name__ == '__main__':
 
                     # turn right
                     elif msg.decode() == 'peace':
-                        turn_rate = 0.005 * np.pi
-                        speed = 0.2
+                        turn_rate = 0.004 * np.pi
+                        speed = 0.1
 
                     # turn left
                     elif msg.decode() == 'rock':
-                        turn_rate = -0.005 * np.pi
-                        speed = 0.2
-
+                        turn_rate = -0.004 * np.pi
+                        speed = 0.1
                     else:
                         speed = 0
                         turn_rate = 0
-                else:
-                    print(speed, turn_rate)
+                    print("Received: " + msg.decode(), speed, turn_rate)
 
-                if time.time() - time_of_last_cmd > 3:
+                if time.time() - time_of_last_cmd > 3 and not on_robot_and_manual:
                     speed = 0
                     turn_rate = 0
                     print("Too long since last command")
@@ -212,7 +209,10 @@ if __name__ == '__main__':
                     else:                              # Middle means normal walking
                         operation_mode = 0
 
-                    if state.radio.channel[7] > 0:
+                    raw_side_spd = -state.radio.channel[1]
+                    side_speed = raw_side_spd * side_speed_bounds[1] if raw_side_spd > 0 else -raw_side_spd * side_speed_bounds[0]
+
+                    if state.radio.channel[13] > 0:
                         # Radio control
                         turn_rate = -state.radio.channel[3] / 60.0
 
@@ -229,8 +229,6 @@ if __name__ == '__main__':
                             raw_spd = 0
                         speed += raw_spd * 0.1
 
-                        raw_side_spd = -state.radio.channel[1]
-                        side_speed = raw_side_spd * side_speed_bounds[1] if raw_side_spd > 0 else -raw_side_spd * side_speed_bounds[0]
 
                         #phase_add = default_simrate + default_simrate * (state.radio.channel[4] + 0.75)/2
                         phase_add = default_simrate * remap(state.radio.channel[4], -1, 1, min_step_freq, max_step_freq)
@@ -238,9 +236,10 @@ if __name__ == '__main__':
                         #period_shift = [(state.radio.channel[6] + 1)/2, 0.5]
                         period_shift = [remap(state.radio.channel[6], -1, 1, 0, 0.5), 0.5]
 
-                        r_range = max_swing_ratio - min_swing_ratio
+                        #r_range = max_swing_ratio - min_swing_ratio
                         #new_r = (state.radio.channel[7] + 1) / (2 * r_range) + min_swing_ratio
                         ratio = [0.45, 0.55]
+                        print("MANUAL", speed, turn_rate)
 
                 if ESTOP:
                     if hasattr(policy, 'init_hidden_state'):
