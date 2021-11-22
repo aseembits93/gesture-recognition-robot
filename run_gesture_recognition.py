@@ -14,7 +14,7 @@ class Run_gesture_recognition:
         self.mpDraw = mp.solutions.drawing_utils
 
         # Load the gesture recognizer model
-        self.model = load_model('mp_hand_gesture')
+        self.model = load_model('./mp_hand_gesture')
 
         self.classNames = ['okay', 'peace', 'thumbs up', 'thumbs down',
                     'call me', 'stop', 'rock', 'live long', 'fist', 'smile']
@@ -23,13 +23,13 @@ class Run_gesture_recognition:
         self.cap = cv2.VideoCapture(0)
 
         #Initialize connection
-        host = 'local host'
+        host = 'localhost'
         port = 7020
 
         print("Starting")
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind(("", port))
+        s.bind((host, port))
         s.listen(1) #Allow only 1 connection
 
         self.c, addr = s.accept()
@@ -86,10 +86,9 @@ class Run_gesture_recognition:
             cv2.imshow("Output", frame)
 
             if post_processed:
-                if self.current_gesture != className:
-                    self.current_gesture = className
-                    msg = className
-                    self.c.send(msg.encode())
+                self.current_gesture = className
+                msg = className
+                self.c.send(msg.encode())
 
             if cv2.waitKey(1) == ord('q'):
                 break

@@ -39,14 +39,15 @@ if __name__ == '__main__':
     print("Policy is a: {}".format(policy.__class__.__name__))
     time.sleep(1)
 
-    host = "local host"
+    host = "localhost"
     port = 7020
     freq = 50
 
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
     print("connecting to socket")
-    s.connect(("10.1.10.108", port))
+    #s.connect(("10.1.10.108", port))
+    s.connect((host, port))
     s.setblocking(0)
 
     print("Connected to socket")
@@ -135,6 +136,9 @@ if __name__ == '__main__':
         t  = time.monotonic()
         t0 = t
         with torch.no_grad():
+            time_of_last_cmd = time.time()
+            turn_rate = 0
+
             while True:
                 t = time.monotonic()
 
@@ -145,12 +149,59 @@ if __name__ == '__main__':
                 while state is None:
                     state = cassie.recv_newest_pd()
 
-                turn_rate = 0
+                """
+                Control of the robot in simulation using a keyboard.
+                """
+                tt = time.monotonic() - t0
+
+                ready = select.select([s],[],[],1/freq)
+                if ready[0]:
+
+                    time_of_last_cmd = time.time()
+                    msg = s.recv(1024)
+                    print("Received: " + msg.decode())
+                    
+                    print(msg.decode())
+                    # thumbs up or call me: forward
+                    if msg.decode() == "thumbs up" or msg.decode() == 'call me':
+                        speed = 0.4
+                        turn_rate = 0
+
+                    # thumbs down: backward
+                    elif msg.decode() == "thumbs down":
+                        speed = -0.3
+                        turn_rate = 0
+
+                    # stop or live long
+                    elif msg.decode() == "stop" or msg.decode() == 'live long':
+                        speed = 0.0
+                        turn_rate = 0
+
+                    # turn right
+                    elif msg.decode() == 'peace':
+                        turn_rate = 0.005 * np.pi
+                        speed = 0.2
+
+                    # turn left
+                    elif msg.decode() == 'rock':
+                        turn_rate = -0.005 * np.pi
+                        speed = 0.2
+
+                    else:
+                        speed = 0
+                        turn_rate = 0
+                else:
+                    print(speed, turn_rate)
+
+                if time.time() - time_of_last_cmd > 3:
+                    speed = 0
+                    turn_rate = 0
+                    print("Too long since last command")
+
                 if platform.node() == 'cassie':
                     """
                     Control of the physical robot using a wireless handheld controller.
                     """
-
                     # Switch the operation mode based on the toggle next to STO
                     if state.radio.channel[9] < -0.5:  # towards operator means damping shutdown mode
                         operation_mode = 2
@@ -161,137 +212,37 @@ if __name__ == '__main__':
                     else:                              # Middle means normal walking
                         operation_mode = 0
 
-                    # Radio control
-                    turn_rate = -state.radio.channel[3] / 60.0
+                    if state.radio.channel[7] > 0:
+                        # Radio control
+                        turn_rate = -state.radio.channel[3] / 60.0
 
-                    # Reset orientation on STO
-                    if state.radio.channel[8] < 0:
-                        orient_add = quaternion2euler(state.pelvis.orientation[:])[2]
-                        ESTOP = True
-                    else:
-                        ESTOP = False
-                        logged = False
-
-                    raw_spd = (state.radio.channel[0]) * 0.1
-                    if np.abs(raw_spd) < 0.01:
-                        raw_spd = 0
-                    speed += raw_spd * 0.1
-
-                    raw_side_spd = -state.radio.channel[1]
-                    side_speed = raw_side_spd * side_speed_bounds[1] if raw_side_spd > 0 else -raw_side_spd * side_speed_bounds[0]
-
-                    #phase_add = default_simrate + default_simrate * (state.radio.channel[4] + 0.75)/2
-                    phase_add = default_simrate * remap(state.radio.channel[4], -1, 1, min_step_freq, max_step_freq)
-
-                    #period_shift = [(state.radio.channel[6] + 1)/2, 0.5]
-                    period_shift = [remap(state.radio.channel[6], -1, 1, 0, 0.5), 0.5]
-
-                    r_range = max_swing_ratio - min_swing_ratio
-                    #new_r = (state.radio.channel[7] + 1) / (2 * r_range) + min_swing_ratio
-                    new_r = remap(state.radio.channel[7], -1, 1, 0, max_swing_ratio)
-                    ratio = [new_r, 1 - new_r]
-
-                else:
-                    """
-                    Control of the robot in simulation using a keyboard.
-                    """
-                    tt = time.monotonic() - t0
-
-                    ready = select.select([s],[],[],1/freq)
-                    if ready[0]:
-                        msg = s.recv(1024)
-                        print("Received: " + msg.decode())
-                        
-                        if msg.decode() == "thumbs up":
-                            speed = 0.4
-
-                        elif msg.decode() == "thumbs down":
-                            speed = -0.3
-
-                        elif msg.decode() == "stop":
-                            speed = 0.0
-
+                        # Reset orientation on STO
+                        if state.radio.channel[8] < 0:
+                            orient_add = quaternion2euler(state.pelvis.orientation[:])[2]
+                            ESTOP = True
                         else:
-                            pass
-
-                        
-
-                    else:
-                        print(speed)
-
-                    
-                    '''
-                    if check_stdin():
-                        c = sys.stdin.read(1)
-                        if c == 'w':
-                            speed = np.clip(speed + 0.1, *speed_bounds)
-                        if c == 's':
-                            speed = np.clip(speed - 0.1, *speed_bounds)
-                        if c == 'q':
-                            turn_rate = -0.01 * np.pi
-                        if c == 'e':
-                            turn_rate = 0.01 * np.pi
-                        if c == 'a':
-                            side_speed = np.clip(side_speed + 0.05, *side_speed_bounds)
-                        if c == 'd':
-                            side_speed = np.clip(side_speed - 0.05, *side_speed_bounds)
-                        if c == 't':
-                            phase_add = np.clip(phase_add + 1, int(default_simrate * step_freq_bounds[0]), int(default_simrate * step_freq_bounds[1]))
-                        if c == 'g':
-                            phase_add = np.clip(phase_add - 1, int(default_simrate * step_freq_bounds[0]), int(default_simrate * step_freq_bounds[1]))
-                        if c == 'o':
-                            # increase ratio of phase 1
-                            ratio[0] = np.clip(ratio[0] + 0.01, *ratio_bounds)
-                            ratio[1] = 1 - ratio[0]
-                        if c == 'l':
-                            ratio[0] = np.clip(ratio[0] - 0.01, *ratio_bounds)
-                            ratio[1] = 1 - ratio[0]
-                        if c == 'p':
-                            period_shift[0] = np.clip(period_shift[0] + 0.01, 0, 0.5)
-                        if c == ';':
-                            period_shift[0] = np.clip(period_shift[0] - 0.01, 0, 0.5)
-
-                        if c == 'x':
-                            policy.init_hidden_state()
-                            ESTOP = not ESTOP
+                            ESTOP = False
                             logged = False
-                    '''
+
+                        raw_spd = (state.radio.channel[0]) * 0.1
+                        if np.abs(raw_spd) < 0.01:
+                            raw_spd = 0
+                        speed += raw_spd * 0.1
+
+                        raw_side_spd = -state.radio.channel[1]
+                        side_speed = raw_side_spd * side_speed_bounds[1] if raw_side_spd > 0 else -raw_side_spd * side_speed_bounds[0]
+
+                        #phase_add = default_simrate + default_simrate * (state.radio.channel[4] + 0.75)/2
+                        phase_add = default_simrate * remap(state.radio.channel[4], -1, 1, min_step_freq, max_step_freq)
+
+                        #period_shift = [(state.radio.channel[6] + 1)/2, 0.5]
+                        period_shift = [remap(state.radio.channel[6], -1, 1, 0, 0.5), 0.5]
+
+                        r_range = max_swing_ratio - min_swing_ratio
+                        #new_r = (state.radio.channel[7] + 1) / (2 * r_range) + min_swing_ratio
+                        ratio = [0.45, 0.55]
 
                 if ESTOP:
-                    # Save log files after STO toggle (skipping first STO)
-                    if not logged:
-                        logged = True
-
-                        if should_log:
-                            # log(ESTOP_count)
-                            data = {"time": time_log,
-                                    "output": output_log,
-                                    "input": input_log,
-                                    "state": state_log,
-                                    "target": target_log}
-
-                            fname = 'log_' + \
-                                    datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d_%H:%M') + \
-                                    '_' + str(datetime.timedelta(seconds=round(tt))) + \
-                                    '.pkl'
-                            print()
-                            print(fname)
-                            print()
-
-                            filep = open(fname, 'wb')
-                            pickle.dump(data, filep)
-                            filep.close()
-
-                            ESTOP_count += 1
-
-                            # Clear out logs
-                            time_log   = []
-                            input_log  = []
-                            output_log = []
-                            state_log  = []
-                            target_log = []
-                        t0 = time.monotonic()
-
                     if hasattr(policy, 'init_hidden_state'):
                         policy.init_hidden_state()
 
@@ -301,6 +252,7 @@ if __name__ == '__main__':
                         policy.init_hidden_state()
 
                 # Quat before bias modification
+                orient_add += turn_rate
                 quaternion = euler2quat(z=orient_add, y=0, x=0)
                 iquaternion = inverse_quaternion(quaternion)
                 new_orient = quaternion_product(iquaternion, state.pelvis.orientation[:])
