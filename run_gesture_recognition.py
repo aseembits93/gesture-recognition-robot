@@ -23,7 +23,7 @@ class Run_gesture_recognition:
         self.cap = cv2.VideoCapture(0)
 
         #Initialize connection
-        host = '192.168.2.251'
+        host = '192.168.2.138'
         port = 7020
 
 
@@ -126,7 +126,7 @@ class Run_gesture_recognition:
                     self.current_gesture = self.classNames[most_likely_current_gesture_index]
                     #print(f"probability of {self.current_gesture} is {np.amax(self.belief)}")
 
-                cv2.drawContours(frame,[box],0,(0,191,255),1)
+                #cv2.drawContours(frame,[box],0,(0,191,255),1)
                 #cv2.rectangle(frame, box[], (255,0,0), 2)
                 # show the prediction on the frame
                 cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
