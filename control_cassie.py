@@ -39,7 +39,8 @@ if __name__ == '__main__':
     print("Policy is a: {}".format(policy.__class__.__name__))
     time.sleep(1)
 
-    host = "192.168.2.138"
+    #host = "192.168.2.138"
+    host = "127.0.0.1"
     port = 7021
     freq = 50
 
