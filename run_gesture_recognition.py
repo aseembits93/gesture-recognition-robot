@@ -1,5 +1,5 @@
 import cv2
-import socket
+import socket, pickle
 import numpy as np
 import mediapipe as mp
 import tensorflow as tf
@@ -26,6 +26,11 @@ class Run_gesture_recognition:
         host = '192.168.2.251'
         port = 7020
 
+
+        #Initialize belief array for discrete bayes filter
+
+        self.belief = np.array((1/len(self.classNames) * np.ones(len(self.classNames))))
+
         print("Starting")
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -38,6 +43,36 @@ class Run_gesture_recognition:
 
         self.current_gesture = ""
         self.run()
+
+
+    def normalize_belief(self, distribution):
+
+        distribution /= sum(distribution.astype(float))
+
+        distribution = np.clip(distribution, 1e-5, 0.99)
+
+        return distribution
+
+
+
+    def update_belief(self, belief, gestureReading, prob_correct): 
+
+        gestureReading_beliefIndex = self.classNames.index(gestureReading)#belief.index(gestureReading)
+        #print("lol")
+        #print(gestureReading_beliefIndex)
+        scale = prob_correct / (1 - prob_correct)
+        #print(belief)
+        for i, gestureProb in enumerate(belief):
+
+            if gestureReading_beliefIndex == i:
+
+                gestureProb *= scale 
+                belief[i] = gestureProb
+
+
+        updatedBelief = self.normalize_belief(belief)
+
+        self.belief = updatedBelief
 
     def run(self, n=10):
         print("Running")
@@ -66,6 +101,12 @@ class Run_gesture_recognition:
 
                         landmarks.append([lmx, lmy])
 
+                    rect = cv2.minAreaRect(np.array([landmarks]))
+                    
+                    gestureAngle = rect[2]
+                    box = cv2.boxPoints(rect)
+                    box = np.int0(box)
+
                     # Drawing landmarks on frames
                     self.mpDraw.draw_landmarks(
                         frame, handslms, self.mpHands.HAND_CONNECTIONS)
@@ -78,6 +119,15 @@ class Run_gesture_recognition:
                     last_n = last_n[1:] + [self.classNames[classID]]
                     className = max(last_n, key=last_n.count)
 
+                    self.update_belief(self.belief, className, 0.9)
+
+                    most_likely_current_gesture_index = np.argmax(self.belief)
+                    className = self.classNames[most_likely_current_gesture_index]
+                    self.current_gesture = self.classNames[most_likely_current_gesture_index]
+                    #print(f"probability of {self.current_gesture} is {np.amax(self.belief)}")
+
+                cv2.drawContours(frame,[box],0,(0,191,255),1)
+                #cv2.rectangle(frame, box[], (255,0,0), 2)
                 # show the prediction on the frame
                 cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                             1, (0, 0, 255), 2, cv2.LINE_AA)
@@ -86,9 +136,10 @@ class Run_gesture_recognition:
             cv2.imshow("Output", frame)
 
             if post_processed:
-                self.current_gesture = className
-                msg = className
-                self.c.send(msg.encode())
+
+                msg = [className, gestureAngle]
+                msg = pickle.dumps(msg)
+                self.c.send(msg)
 
             if cv2.waitKey(1) == ord('q'):
                 break

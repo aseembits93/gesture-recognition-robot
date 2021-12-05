@@ -28,6 +28,35 @@ def remap(val, min1, max1, min2, max2):
     scaled = (val - min1) / span1
     return np.clip(min2 + (scaled * span2), min2, max2)
 
+
+def mapAngles2TurnRate(angle):
+
+
+    if 50 < angle < 85:
+
+        turnRateBounds = [0.001,0.01]
+        angleBounds = [85,50]
+
+        turnRate = np.interp(angle, angleBounds, turnRateBounds)
+        
+        return turnRate
+    
+    if 10 < angle < 45:
+
+        turnRateBounds = [0.001,0.01]
+        angleBounds = [10,45]
+
+        turnRate = np.interp(angle, angleBounds, turnRateBounds)
+        
+        return turnRate
+
+
+
+
+
+
+
+
 def check_stdin():
     return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
 
@@ -39,7 +68,8 @@ if __name__ == '__main__':
     print("Policy is a: {}".format(policy.__class__.__name__))
     time.sleep(1)
 
-    host = "192.168.2.138"
+    #host = "192.168.2.138"
+    host = "127.0.0.1"
     port = 7021
     freq = 50
 
@@ -161,34 +191,45 @@ if __name__ == '__main__':
                     time_of_last_cmd = time.time()
                     msg = s.recv(1024)
                     
+                    gesture = pickle.loads(msg)
+                    
                     # thumbs up or call me: forward
-                    if msg.decode() == "thumbs up" or msg.decode() == 'call me':
+                    if gesture[0] == "thumbs up" or gesture[0] == 'call me':
                         speed = 0.3
                         turn_rate = 0
 
                     # thumbs down: backward
-                    elif msg.decode() == "thumbs down":
+                    elif gesture[0] == "thumbs down":
                         speed = -0.25
                         turn_rate = 0
 
                     # stop or live long
-                    elif msg.decode() == "stop" or msg.decode() == 'live long':
+                    elif gesture[0] == "stop" or gesture[0] == 'live long':
                         speed = 0.0
                         turn_rate = 0
+                    
 
+                    #gesture[1] encodes the gesture angle and is in range[90,0)
+
+                    #left of vertical -> 90-theta 
+                    #right of vertical -> 0+theta
                     # turn right
-                    elif msg.decode() == 'peace':
-                        turn_rate = 0.004 * np.pi
+                    elif gesture[0] == 'peace' and 10 <= gesture[1] < 45 :
+                        turn_rate = mapAngles2TurnRate(gesture[1]) * np.pi
                         speed = 0.1
 
                     # turn left
-                    elif msg.decode() == 'rock':
-                        turn_rate = -0.004 * np.pi
+                    elif gesture[0] == 'peace' and 50 <= gesture[1] < 85 :
+                        turn_rate = -1 * mapAngles2TurnRate(gesture[1]) * np.pi
                         speed = 0.1
+
+                    elif gesture[0] == 'peace' and 85 <= gesture[1] < 10 :
+                        speed = 0.1           
+
                     else:
                         speed = 0
                         turn_rate = 0
-                    print("Received: " + msg.decode(), speed, turn_rate)
+                    print("Received: " + gesture, speed, turn_rate)
 
                 if time.time() - time_of_last_cmd > 3 and not on_robot_and_manual:
                     speed = 0
