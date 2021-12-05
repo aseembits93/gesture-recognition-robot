@@ -28,6 +28,35 @@ def remap(val, min1, max1, min2, max2):
     scaled = (val - min1) / span1
     return np.clip(min2 + (scaled * span2), min2, max2)
 
+
+def mapAngles2TurnRate(angle):
+
+
+    if 50 < angle < 85:
+
+        turnRateBounds = [0.001,0.01]
+        angleBounds = [85,50]
+
+        turnRate = np.interp(angle, angleBounds, turnRateBounds)
+        
+        return turnRate
+    
+    if 10 < angle < 45:
+
+        turnRateBounds = [0.001,0.01]
+        angleBounds = [10,45]
+
+        turnRate = np.interp(angle, angleBounds, turnRateBounds)
+        
+        return turnRate
+
+
+
+
+
+
+
+
 def check_stdin():
     return select.select([sys.stdin], [], [], 0) == ([sys.stdin], [], [])
 
@@ -186,12 +215,12 @@ if __name__ == '__main__':
                     #right of vertical -> 0+theta
                     # turn right
                     elif gesture[0] == 'peace' and 10 <= gesture[1] < 45 :
-                        turn_rate = 0.004 * np.pi
+                        turn_rate = mapAngles2TurnRate(gesture[1]) * np.pi
                         speed = 0.1
 
                     # turn left
-                    elif gesture[0] == 'peace' and 65 <= gesture[1] < 85 :
-                        turn_rate = -0.004 * np.pi
+                    elif gesture[0] == 'peace' and 50 <= gesture[1] < 85 :
+                        turn_rate = -1 * mapAngles2TurnRate(gesture[1]) * np.pi
                         speed = 0.1
 
                     elif gesture[0] == 'peace' and 85 <= gesture[1] < 10 :
