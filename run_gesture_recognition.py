@@ -26,6 +26,12 @@ class Run_gesture_recognition:
         host = '192.168.2.138'
         port = 7021
 
+
+        #Initialize belief array for discrete bayes filter
+
+        #self.belief = np.array([1/(len(self.classNames))]) * len(self.classNames)) 
+        self.belief = np.array((1/len(self.classNames) * np.ones(len(self.classNames))))
+
         print("Starting")
 
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -38,6 +44,46 @@ class Run_gesture_recognition:
 
         self.current_gesture = ""
         self.run()
+
+
+    def normalize_belief(self, distribution):
+
+        distribution /= sum(distribution.astype(float))
+
+        distribution = np.clip(distribution, 1e-5, 0.99)
+
+        return distribution
+
+
+
+    def update_belief(self, belief, gestureReading, prob_correct): 
+
+        gestureReading_beliefIndex = self.classNames.index(gestureReading)#belief.index(gestureReading)
+        #print("lol")
+        #print(gestureReading_beliefIndex)
+        scale = prob_correct / (1 - prob_correct)
+        print(belief)
+        for i, gestureProb in enumerate(belief):
+
+            if gestureReading_beliefIndex == i:
+
+                gestureProb *= scale 
+                belief[i] = gestureProb
+                #np.clip(gestureProb, 0.0001,0.99)
+
+
+        #print(belief)
+        updatedBelief = self.normalize_belief(belief)
+
+        self.belief = updatedBelief
+
+        #print(self.belief)
+
+
+
+
+
+
 
     def run(self, n=10):
         print("Running")
@@ -78,6 +124,16 @@ class Run_gesture_recognition:
                     last_n = last_n[1:] + [self.classNames[classID]]
                     className = max(last_n, key=last_n.count)
 
+
+
+                    self.update_belief(self.belief, className, 0.9)
+
+                    most_likely_current_gesture_index = np.argmax(self.belief)
+                    className = self.classNames[most_likely_current_gesture_index]
+                    self.current_gesture = self.classNames[most_likely_current_gesture_index]
+                    print(f"probability of {self.current_gesture} is {np.amax(self.belief)}")
+
+
                 # show the prediction on the frame
                 cv2.putText(frame, className, (10, 50), cv2.FONT_HERSHEY_SIMPLEX,
                             1, (0, 0, 255), 2, cv2.LINE_AA)
@@ -86,7 +142,7 @@ class Run_gesture_recognition:
             cv2.imshow("Output", frame)
 
             if post_processed:
-                self.current_gesture = className
+
                 msg = className
                 self.c.send(msg.encode())
 
