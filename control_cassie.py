@@ -161,34 +161,40 @@ if __name__ == '__main__':
                     time_of_last_cmd = time.time()
                     msg = s.recv(1024)
                     
+                    gesture = pickle.loads(msg)
+                    
                     # thumbs up or call me: forward
-                    if msg.decode() == "thumbs up" or msg.decode() == 'call me':
+                    if gesture[0] == "thumbs up" or gesture[0] == 'call me':
                         speed = 0.3
                         turn_rate = 0
 
                     # thumbs down: backward
-                    elif msg.decode() == "thumbs down":
+                    elif gesture[0] == "thumbs down":
                         speed = -0.25
                         turn_rate = 0
 
                     # stop or live long
-                    elif msg.decode() == "stop" or msg.decode() == 'live long':
+                    elif gesture[0] == "stop" or gesture[0] == 'live long':
                         speed = 0.0
                         turn_rate = 0
 
                     # turn right
-                    elif msg.decode() == 'peace':
+                    elif gesture[0] == 'peace' and 10 <= gesture[1] < 45 :
                         turn_rate = 0.004 * np.pi
                         speed = 0.1
 
                     # turn left
-                    elif msg.decode() == 'rock':
+                    elif gesture[0] == 'peace' and 65 <= gesture[1] < 85 :
                         turn_rate = -0.004 * np.pi
                         speed = 0.1
+
+                    elif gesture[0] == 'peace' and 85 <= gesture[1] < 10 :
+                        speed = 0.1           
+
                     else:
                         speed = 0
                         turn_rate = 0
-                    print("Received: " + msg.decode(), speed, turn_rate)
+                    print("Received: " + gesture, speed, turn_rate)
 
                 if time.time() - time_of_last_cmd > 3 and not on_robot_and_manual:
                     speed = 0
