@@ -23,8 +23,8 @@ class Run_gesture_recognition:
         self.cap = cv2.VideoCapture(0)
 
         #Initialize connection
-        host = '192.168.2.138'
-        port = 7021
+        host = '192.168.2.251'
+        port = 7020
 
         print("Starting")
 
