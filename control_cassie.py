@@ -178,7 +178,12 @@ if __name__ == '__main__':
                     elif gesture[0] == "stop" or gesture[0] == 'live long':
                         speed = 0.0
                         turn_rate = 0
+                    
 
+                    #gesture[1] encodes the gesture angle and is in range[90,0)
+
+                    #left of vertical -> 90-theta 
+                    #right of vertical -> 0+theta
                     # turn right
                     elif gesture[0] == 'peace' and 10 <= gesture[1] < 45 :
                         turn_rate = 0.004 * np.pi
